@@ -1,0 +1,9 @@
+/target
+/.idea
+
+# Commercial ROMs and save files
+*.gb
+*.GB
+*.gbc
+*.GBC
+*.sav
