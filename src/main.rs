@@ -1,5 +1,6 @@
 mod bus;
 mod cartridge;
+mod registers;
 
 use cartridge::Cartridge;
 use std::path::Path;
