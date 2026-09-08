@@ -1,3 +1,4 @@
+mod bus;
 mod cartridge;
 
 use cartridge::Cartridge;
