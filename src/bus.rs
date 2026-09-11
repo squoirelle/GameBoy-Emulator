@@ -64,6 +64,12 @@ impl Bus {
             0xC000..=0xFDFF => self.wram[addr as usize & 0x1FFF],
             0xFE00..=0xFE9F => self.ppu.oam[(addr - 0xFE00) as usize],
             0xFF00 => self.joypad.read(),
+            // Colour-only registers. They do not exist on a DMG and read as
+            // 0xFF, which is how a ROM tells the two machines apart. Reading
+            // 0x00 instead tells it the hardware is there: Blargg's cpu_instrs
+            // writes KEY1 and executes STOP to switch to double speed, and
+            // lands on an instruction no DMG game ever runs.
+            0xFF4D | 0xFF4F | 0xFF51..=0xFF55 | 0xFF68..=0xFF6B | 0xFF70 => 0xFF,
             0xFF0F => self.iflag | 0xE0,
             0xFF04 => self.timer.div(),
             0xFF05 => self.timer.tima,
