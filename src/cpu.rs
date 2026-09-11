@@ -8,6 +8,7 @@ pub struct Cpu {
     pub regs: Registers,
     ime: bool,
     halted: bool,
+    halt_bug: bool
 }
 
 impl Cpu {
@@ -17,11 +18,31 @@ impl Cpu {
             regs: Registers::post_boot(),
             ime: false,
             halted: false,
+            halt_bug: false,
         }
+    }
+
+    pub fn will_execute(&self, bus: &Bus) -> bool {
+        !self.halted && !(self.ime && bus.pending_interrupts() != 0)
     }
 
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         let pc = self.regs.pc;
+        let pending = bus.pending_interrupts();
+        if pending != 0 {
+            self.halted = false;
+            if self.ime {
+                self.ime = false;
+                let bit = pending.trailing_zeros() as u8;
+                bus.clear_interrupt(bit);
+                self.push16(bus, self.regs.pc);
+                self.regs.pc = (0x40 + bit * 8) as u16;
+                return 20;
+            }
+        }
+        if self.halted {
+            return 4;
+        }
         let op = self.fetch8(bus);
         let x = op >> 6;
         let y = (op >> 3) & 7;
@@ -50,7 +71,7 @@ impl Cpu {
             (0, 5, 7)           => self.cpl(),
             (0, 6, 7)           => self.scf(),
             (0, 7, 7)           => self.ccf(),
-            (1, 6, 6)           => self.halt(),                                         // HALT
+            (1, 6, 6)           => self.halt(bus),                                         // HALT
             (1, _, _)           => self.ld_r8_r8(bus, y, z),                            // LD r8,r8
             (2, _, _)           => { self.alu(y, self.get_r8(R8::from_code(z), bus));
                                     if z == 6 { 8 } else { 4 } },                               // ALU[y] A, r[z]
@@ -115,7 +136,11 @@ impl Cpu {
 
     fn fetch8(&mut self, bus: &mut Bus) -> u8 {
         let value = bus.read(self.regs.pc);
-        self.regs.pc = self.regs.pc.wrapping_add(1);
+        if self.halt_bug {
+            self.halt_bug = false;
+        } else {
+            self.regs.pc = self.regs.pc.wrapping_add(1);
+        }
         value
     }
 
@@ -125,8 +150,12 @@ impl Cpu {
         lo | hi
     }
 
-    fn halt(&mut self) -> u32 {
-        self.halted = true;
+    fn halt(&mut self, bus: &mut Bus) -> u32 {
+        if !self.ime && bus.pending_interrupts() != 0 {
+            self.halt_bug = true;
+        } else {
+            self.halted = true;
+        }
         4
     }
 
@@ -682,5 +711,127 @@ impl R16 {
             3 => R16::AF,
             _ => unreachable!("R16 code out of range: {code}"),
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cartridge::{fake_rom, Cartridge};
+
+    const VBLANK: u8 = 0;
+    const TIMER: u8 = 2;
+
+    /// A bus over a blank 32 KiB cartridge. Address 0x0100, where post_boot
+    /// leaves PC, holds 0x00 -- so an undispatched step executes a NOP.
+    fn test_bus() -> Bus {
+        Bus::new(Cartridge::from_bytes(fake_rom("TEST", 0x00, 0x00, 0x00)).unwrap())
+    }
+
+    /// A CPU with interrupts unmasked and `sources` already requested.
+    fn armed(bus: &mut Bus, sources: &[u8]) -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.ime = true;
+        bus.write(0xFFFF, 0xFF); // IE: every source enabled
+        for &bit in sources {
+            bus.request_interrupt(bit);
+        }
+        cpu
+    }
+
+    #[test]
+    fn dispatch_vectors_to_the_right_handler() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[TIMER]);
+
+        let cycles = cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs.pc, 0x0050, "the timer vector is 0x40 + 2 * 8");
+        assert_eq!(cycles, 20);
+    }
+
+    #[test]
+    fn dispatch_acknowledges_the_source_and_masks_further_interrupts() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[TIMER]);
+
+        cpu.step(&mut bus);
+
+        assert!(!cpu.ime, "IME must be clear so the handler is not interrupted");
+        assert_eq!(
+            bus.pending_interrupts() & (1 << TIMER),
+            0,
+            "the serviced request must be cleared from IF, not left set"
+        );
+    }
+
+    #[test]
+    fn dispatch_pushes_the_return_address() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[TIMER]);
+        let before = cpu.regs.pc;
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs.sp, 0xFFFE - 2, "two bytes should be on the stack");
+        assert_eq!(cpu.pop16(&mut bus), before, "RETI must come back to where we left");
+    }
+
+    #[test]
+    fn vblank_outranks_the_timer() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[VBLANK, TIMER]);
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs.pc, 0x0040, "the lowest set bit wins");
+        assert_ne!(
+            bus.pending_interrupts() & (1 << TIMER),
+            0,
+            "the timer request must stay pending for the next dispatch"
+        );
+    }
+
+    #[test]
+    fn a_request_waits_while_ime_is_clear() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[TIMER]);
+        cpu.ime = false; // DI, or inside another handler
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs.pc, 0x0101, "the NOP at 0x0100 should have run instead");
+        assert_ne!(
+            bus.pending_interrupts() & (1 << TIMER),
+            0,
+            "the request is deferred, not discarded"
+        );
+    }
+
+    #[test]
+    fn ie_gates_dispatch() {
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[TIMER]);
+        bus.write(0xFFFF, 0x00); // IE: nothing enabled
+
+        cpu.step(&mut bus);
+
+        assert_eq!(cpu.regs.pc, 0x0101, "a request with IE clear must not dispatch");
+    }
+
+    #[test]
+    fn will_execute_reports_whether_an_opcode_runs() {
+        let mut bus = test_bus();
+        let cpu = armed(&mut bus, &[TIMER]);
+
+        // gameboy-doctor wants one trace line per executed opcode, and a
+        // dispatch executes none.
+        assert!(!cpu.will_execute(&bus));
+
+        let mut bus = test_bus();
+        let mut cpu = armed(&mut bus, &[]);
+        assert!(cpu.will_execute(&bus));
+
+        cpu.halted = true;
+        assert!(!cpu.will_execute(&bus));
     }
 }

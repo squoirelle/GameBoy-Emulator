@@ -2,6 +2,7 @@ mod bus;
 mod cartridge;
 mod registers;
 mod cpu;
+mod timer;
 
 use crate::bus::Bus;
 use crate::cpu::Cpu;
@@ -46,10 +47,11 @@ fn main() {
 
     let mut steps = 0u64;
     while steps < max_steps {
-        if let Some(out) = trace.as_mut() {
-            cpu.write_trace(&bus, out).expect("failed to write the trace");
+        if cpu.will_execute(&bus) {
+            if let Some(out) = trace.as_mut() { cpu.write_trace(&bus, out).expect("Couldn't write to trace") ; }
         }
-        cpu.step(&mut bus);
+        let cycles = cpu.step(&mut bus);
+        bus.tick(cycles);
         steps += 1;
     }
 

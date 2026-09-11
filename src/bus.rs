@@ -1,6 +1,7 @@
 use crate::cartridge::Cartridge;
 use std::cell::Cell;
 use std::io::Write;
+use crate::timer::Timer;
 
 // I/O registers that mean something to us today. The rest of 0xFF00-0xFF7F is
 // still plain storage until the timer and PPU arrive.
@@ -18,6 +19,7 @@ pub struct Bus {
     io: [u8; 0x80],
     hram: [u8; 0x7F],
     ie: u8,
+    iflag: u8,
     /// Everything the cartridge has sent over the serial port. Test ROMs report
     /// their results here, so this is the harness for step 3.
     pub serial: String,
@@ -27,6 +29,7 @@ pub struct Bus {
     /// Stand-in for the PPU's line counter until step 5. A `Cell` because it
     /// advances on read, and `read` takes `&self`.
     ly: Cell<u8>,
+    timer: Timer,
 }
 
 impl Bus {
@@ -38,10 +41,12 @@ impl Bus {
             oam: [0; 0xA0],
             io: [0; 0x80],
             hram: [0; 0x7F],
+            iflag: 0,
             ie: 0,
             serial: String::new(),
             ly_fixed: false,
             ly: Cell::new(0),
+            timer: Timer::new(),
         }
     }
 
@@ -69,6 +74,11 @@ impl Bus {
                     line
                 }
             }
+            0xFF0F => self.iflag | 0xE0,
+            0xFF04 => self.timer.div(),
+            0xFF05 => self.timer.tima,
+            0xFF06 => self.timer.tma,
+            0xFF07 => self.timer.tac | 0xF8,
             0xFF00..=0xFF7F => self.io[(addr - IO_BASE) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
@@ -91,6 +101,11 @@ impl Bus {
                     self.transfer_serial();
                 }
             }
+            0xFF04 => self.timer.reset_div(),
+            0xFF05 => self.timer.tima = value,
+            0xFF06 => self.timer.tma = value,
+            0xFF07 => self.timer.tac = value & 0x07,
+            0xFF0F => self.iflag = value & 0x1F,
             0xFF00..=0xFF7F => self.io[(addr - IO_BASE) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
             0xFFFF => self.ie = value,
@@ -107,6 +122,16 @@ impl Bus {
         print!("{}", byte as char);
         let _ = std::io::stdout().flush();
     }
+
+    pub fn tick(&mut self, cycles: u32) {
+        if self.timer.tick(cycles) {
+          self.iflag |= 1 << 2;
+        }
+    }
+
+    pub fn pending_interrupts(&self) -> u8 { self.ie & self.iflag & 0x1F }
+    pub fn request_interrupt(&mut self, bit: u8) { self.iflag |= 1 << bit; }
+    pub fn clear_interrupt(&mut self, bit: u8) { self.iflag &= !(1 << bit); }
 }
 
 #[cfg(test)]
