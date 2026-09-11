@@ -1,21 +1,19 @@
 use crate::cartridge::Cartridge;
-use std::cell::Cell;
-use std::io::Write;
+use crate::joypad::{Button, Joypad};
+use crate::ppu::Ppu;
 use crate::timer::Timer;
+use std::io::Write;
 
 // I/O registers that mean something to us today. The rest of 0xFF00-0xFF7F is
 // still plain storage until the timer and PPU arrive.
 const SB: u16 = 0xFF01; // serial transfer data
 const SC: u16 = 0xFF02; // serial transfer control
-const LY: u16 = 0xFF44; // current scanline
 
 const IO_BASE: u16 = 0xFF00;
 
 pub struct Bus {
     cartridge: Cartridge,
-    vram: [u8; 0x2000],
     wram: [u8; 0x2000],
-    oam: [u8; 0xA0],
     io: [u8; 0x80],
     hram: [u8; 0x7F],
     ie: u8,
@@ -23,62 +21,65 @@ pub struct Bus {
     /// Everything the cartridge has sent over the serial port. Test ROMs report
     /// their results here, so this is the harness for step 3.
     pub serial: String,
-    /// gameboy-doctor needs LY pinned to 0x90 or every trace diverges. Real
-    /// games need it to move, so the two modes are mutually exclusive.
+    /// gameboy-doctor needs LY pinned to 0x90 or every trace diverges against
+    /// its reference logs. Real games poll for specific scanlines and hang on
+    /// a constant, so the two modes are mutually exclusive.
     ly_fixed: bool,
-    /// Stand-in for the PPU's line counter until step 5. A `Cell` because it
-    /// advances on read, and `read` takes `&self`.
-    ly: Cell<u8>,
     timer: Timer,
+    joypad: Joypad,
+    ppu: Ppu,
 }
 
 impl Bus {
     pub fn new(cartridge: Cartridge) -> Bus {
         Bus {
             cartridge,
-            vram: [0; 0x2000],
             wram: [0; 0x2000],
-            oam: [0; 0xA0],
             io: [0; 0x80],
             hram: [0; 0x7F],
             iflag: 0,
             ie: 0,
             serial: String::new(),
             ly_fixed: false,
-            ly: Cell::new(0),
             timer: Timer::new(),
+            joypad: Joypad::new(),
+            ppu: Ppu::new()
         }
     }
 
     /// Pins LY to 0x90 for gameboy-doctor runs. Leave it off for real games,
-    /// which poll for specific scanlines and hang on a constant.
+    /// which poll for a specific scanline and would spin forever on a constant.
     pub fn set_ly_fixed(&mut self, fixed: bool) {
         self.ly_fixed = fixed;
+    }
+
+    pub fn framebuffer(&self) -> &[u8] {
+        &self.ppu.framebuffer
     }
 
     pub fn read(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(addr),
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
+            0x8000..=0x9FFF => self.ppu.vram[(addr - 0x8000) as usize],
             0xC000..=0xFDFF => self.wram[addr as usize & 0x1FFF],
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
-            LY => {
-                if self.ly_fixed {
-                    0x90
-                } else {
-                    // No PPU yet, so there is no elapsed time to derive a line
-                    // number from. Stepping one line per read is wrong by any
-                    // measure, but it makes every LY-polling loop terminate.
-                    let line = (self.ly.get() + 1) % 154;
-                    self.ly.set(line);
-                    line
-                }
-            }
+            0xFE00..=0xFE9F => self.ppu.oam[(addr - 0xFE00) as usize],
+            0xFF00 => self.joypad.read(),
             0xFF0F => self.iflag | 0xE0,
             0xFF04 => self.timer.div(),
             0xFF05 => self.timer.tima,
             0xFF06 => self.timer.tma,
             0xFF07 => self.timer.tac | 0xF8,
+            0xFF40 => self.ppu.lcdc,
+            0xFF41 => self.ppu.stat,
+            0xFF42 => self.ppu.scy,
+            0xFF43 => self.ppu.scx,
+            0xFF44 => if self.ly_fixed { 0x90 } else { self.ppu.ly },
+            0xFF45 => self.ppu.lyc,
+            0xFF47 => self.ppu.bgp,
+            0xFF48 => self.ppu.obp0,
+            0xFF49 => self.ppu.obp1,
+            0xFF4A => self.ppu.wy,
+            0xFF4B => self.ppu.wx,
             0xFF00..=0xFF7F => self.io[(addr - IO_BASE) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
@@ -90,9 +91,9 @@ impl Bus {
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(addr, value),
-            0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize] = value,
+            0x8000..=0x9FFF => self.ppu.vram[(addr - 0x8000) as usize] = value,
             0xC000..=0xFDFF => self.wram[addr as usize & 0x1FFF] = value,
-            0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize] = value,
+            0xFE00..=0xFE9F => self.ppu.oam[(addr - 0xFE00) as usize] = value,
             SC => {
                 self.io[(SC - IO_BASE) as usize] = value;
                 // Bit 7 starts a transfer. Other writes only pick a clock
@@ -105,6 +106,25 @@ impl Bus {
             0xFF05 => self.timer.tima = value,
             0xFF06 => self.timer.tma = value,
             0xFF07 => self.timer.tac = value & 0x07,
+            0xFF40 => self.ppu.lcdc = value,
+            0xFF41 => self.ppu.stat = value,
+            0xFF42 => self.ppu.scy = value,
+            0xFF43 => self.ppu.scx = value,
+            0xFF44 => {}, //ignored on hardware
+            0xFF45 => self.ppu.lyc = value,
+            0xFF46 => {
+                let base = (value as u16) << 8;
+                for i in 0..0xA0u16 {
+                    let byte = self.read(base + i);
+                    self.ppu.oam[i as usize] = byte;
+                }
+            }
+            0xFF47 => self.ppu.bgp = value,
+            0xFF48 => self.ppu.obp0 = value,
+            0xFF49 => self.ppu.obp1 = value,
+            0xFF4A => self.ppu.wy = value,
+            0xFF4B => self.ppu.wx = value,
+            0xFF00 => self.joypad.write(value),
             0xFF0F => self.iflag = value & 0x1F,
             0xFF00..=0xFF7F => self.io[(addr - IO_BASE) as usize] = value,
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize] = value,
@@ -123,11 +143,20 @@ impl Bus {
         let _ = std::io::stdout().flush();
     }
 
-    pub fn tick(&mut self, cycles: u32) {
-        if self.timer.tick(cycles) {
-          self.iflag |= 1 << 2;
-        }
+    pub fn tick(&mut self, cycles: u32) -> bool {
+        if self.timer.tick(cycles) { self.request_interrupt(2) }
+        let vblank = self.ppu.tick(cycles);
+        if vblank { self.request_interrupt(0); }
+        vblank
     }
+
+    /// Read-only view of the PPU, for diagnostics.
+    pub fn ppu(&self) -> &Ppu { &self.ppu }
+
+    /// Read-only view of sprite memory, for diagnostics.
+    pub fn oam(&self) -> &[u8] { &self.ppu.oam }
+
+    pub fn set_button(&mut self, button: Button, down: bool) { self.joypad.set(button, down); }
 
     pub fn pending_interrupts(&self) -> u8 { self.ie & self.iflag & 0x1F }
     pub fn request_interrupt(&mut self, bit: u8) { self.iflag |= 1 << bit; }

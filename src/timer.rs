@@ -6,7 +6,7 @@ pub struct Timer {
 }
 
 impl Timer {
-    pub fn new() -> Timer {
+    pub fn new() -> Self {
         Timer { counter: 0, tima: 0u8, tac: 0u8, tma: 0u8 }
     }
 
