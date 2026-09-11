@@ -46,10 +46,10 @@ fn main() {
 
     let mut steps = 0u64;
     while steps < max_steps {
-        cpu.step(&mut bus);
         if let Some(out) = trace.as_mut() {
             cpu.write_trace(&bus, out).expect("failed to write the trace");
         }
+        cpu.step(&mut bus);
         steps += 1;
     }
 
