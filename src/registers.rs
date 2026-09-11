@@ -3,6 +3,7 @@ const FLAG_N: u8 = 0x40;
 const FLAG_H: u8 = 0x20;
 const FLAG_C: u8 = 0x10;
 
+#[derive(Debug, Clone, Copy)]
 pub struct Registers {
     pub a: u8,
     pub b: u8,
@@ -70,6 +71,13 @@ impl Registers {
 
     pub fn f(&self) -> u8 {
         self.f
+    }
+
+    pub fn set_flags(&mut self, z: bool, n: bool, h: bool, c: bool) {
+        self.set_flag_z(z);
+        self.set_flag_n(n);
+        self.set_flag_h(h);
+        self.set_flag_c(c);
     }
 
     pub fn flag_z(&self) -> bool {
