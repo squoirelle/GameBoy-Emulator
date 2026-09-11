@@ -473,7 +473,7 @@ impl Cpu {
     fn jp_cc(&mut self, bus: &mut Bus, y: u8) -> u32 {
         let taken = self.condition(y);
         let addr = self.fetch16(bus);
-        if(taken) {
+        if taken {
             self.regs.pc = addr;
             16
         } else {

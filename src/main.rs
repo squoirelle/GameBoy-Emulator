@@ -65,6 +65,8 @@ fn main() {
             process::exit(1);
         }
     };
+    println!("{}", cart.header);
+
     let mut bus = Bus::new(cart);
     bus.set_ly_fixed(ly_fixed);
     let mut cpu = Cpu::new();
