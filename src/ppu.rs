@@ -23,7 +23,7 @@ pub struct Ppu {
     pub framebuffer: [u8; WIDTH * HEIGHT],
     pub vram: [u8; 0x2000],
     bg_ids: [u8; 160],
-    /// Edge detection for the STAT interrupt line.
+    window_line: u8,
     prev_stat_line: bool,
     pub oam: [u8; 0xA0],
     pub obp0: u8,
@@ -46,6 +46,7 @@ impl Ppu {
             framebuffer: [0; WIDTH * HEIGHT],
             vram: [0; 0x2000],
             bg_ids: [0; 160],
+            window_line: 0,
             prev_stat_line: false,
             oam: [0; 0xA0],
             obp0: 0,
@@ -130,6 +131,10 @@ impl Ppu {
             if self.ly == VBLANK_LINE {
                 requested |= 0x01;
             }
+            if self.ly == 0 {
+                // A new frame: the window starts again from its own row 0.
+                self.window_line = 0;
+            }
         }
 
         let line = self.stat_line();
@@ -180,9 +185,47 @@ impl Ppu {
 
     fn render_line(&mut self, line: u8) {
         self.render_background(line);
+        self.render_window(line);
         if self.lcdc & 0x02 != 0 {          // LCDC bit 1: sprites enabled
             self.render_sprites(line);
         }
+    }
+
+    fn render_window(&mut self, line: u8) {
+        if self.lcdc & 0x21 != 0x21 { return; }   // bits 0 and 5 both required
+        if line < self.wy || self.wx > 166 { return; }
+
+        let map_base = if self.lcdc & 0x40 != 0 { 0x1C00 } else { 0x1800 };
+        let signed   = self.lcdc & 0x10 == 0;
+
+        let tile_row  = (self.window_line / 8) as usize;
+        let pixel_row = (self.window_line % 8) as usize;
+        let mut drew  = false;
+
+        for x in 0..160i16 {
+            let win_x = x + 7 - self.wx as i16;
+            if win_x < 0 { continue; }             // still left of the window
+            drew = true;
+
+            let tile_col  = (win_x / 8) as usize;
+            let pixel_col = (win_x % 8) as usize;
+            let index = self.vram[map_base + tile_row * 32 + tile_col];
+            let tile  = if signed {
+                (0x1000 + (index as i8 as isize) * 16) as usize
+            } else {
+                index as usize * 16
+            };
+
+            let lo = self.vram[tile + pixel_row * 2];
+            let hi = self.vram[tile + pixel_row * 2 + 1];
+            let bit = 7 - pixel_col;
+            let id  = ((hi >> bit) & 1) << 1 | ((lo >> bit) & 1);
+
+            self.framebuffer[line as usize * 160 + x as usize] = (self.bgp >> (id * 2)) & 3;
+            self.bg_ids[x as usize] = id;          // sprite priority sees window pixels too
+        }
+
+        if drew { self.window_line += 1; }
     }
 
     fn render_sprites(&mut self, line: u8) {
