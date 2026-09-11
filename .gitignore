@@ -1,5 +1,7 @@
 /target
 /.idea
+/gameboy-doctor
+/gb-test-roms
 
 # Commercial ROMs and save files
 *.gb
