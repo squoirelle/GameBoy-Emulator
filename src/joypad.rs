@@ -42,12 +42,18 @@ impl Joypad {
         Joypad { select: 0x30, pressed: 0x00 }
     }
 
-    pub fn set(&mut self, button: Button, down: bool) {
+    /// Returns true when this is a fresh press, which is what raises the
+    /// joypad interrupt. Holding a button already down raises nothing.
+    pub fn set(&mut self, button: Button, down: bool) -> bool {
+        let was_down = self.pressed & button.mask() != 0;
+
         if down {
             self.pressed |= button.mask();
         } else {
             self.pressed &= !button.mask();
         }
+
+        down && !was_down
     }
 
     /// Only bits 4-5 are writable; the rest belong to the hardware.

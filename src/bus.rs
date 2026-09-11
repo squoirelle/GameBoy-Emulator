@@ -70,7 +70,7 @@ impl Bus {
             0xFF06 => self.timer.tma,
             0xFF07 => self.timer.tac | 0xF8,
             0xFF40 => self.ppu.lcdc,
-            0xFF41 => self.ppu.stat,
+            0xFF41 => self.ppu.stat(),
             0xFF42 => self.ppu.scy,
             0xFF43 => self.ppu.scx,
             0xFF44 => if self.ly_fixed { 0x90 } else { self.ppu.ly },
@@ -106,8 +106,8 @@ impl Bus {
             0xFF05 => self.timer.tima = value,
             0xFF06 => self.timer.tma = value,
             0xFF07 => self.timer.tac = value & 0x07,
-            0xFF40 => self.ppu.lcdc = value,
-            0xFF41 => self.ppu.stat = value,
+            0xFF40 => self.ppu.set_lcdc(value),
+            0xFF41 => self.ppu.set_stat(value),
             0xFF42 => self.ppu.scy = value,
             0xFF43 => self.ppu.scx = value,
             0xFF44 => {}, //ignored on hardware
@@ -143,11 +143,19 @@ impl Bus {
         let _ = std::io::stdout().flush();
     }
 
+    /// Advances the clocked hardware. Returns true when the PPU finished a
+    /// frame, which is the frontend's cue to present one.
     pub fn tick(&mut self, cycles: u32) -> bool {
-        if self.timer.tick(cycles) { self.request_interrupt(2) }
-        let vblank = self.ppu.tick(cycles);
-        if vblank { self.request_interrupt(0); }
-        vblank
+        if self.timer.tick(cycles) {
+            self.request_interrupt(2);
+        }
+
+        // The PPU can raise VBlank and STAT, so it reports IF bits rather than
+        // a single flag.
+        let requested = self.ppu.tick(cycles);
+        self.iflag |= requested;
+
+        requested & 0x01 != 0
     }
 
     /// Read-only view of the PPU, for diagnostics.
@@ -156,7 +164,11 @@ impl Bus {
     /// Read-only view of sprite memory, for diagnostics.
     pub fn oam(&self) -> &[u8] { &self.ppu.oam }
 
-    pub fn set_button(&mut self, button: Button, down: bool) { self.joypad.set(button, down); }
+    pub fn set_button(&mut self, button: Button, down: bool) {
+        if self.joypad.set(button, down) {
+            self.request_interrupt(4);
+        }
+    }
 
     pub fn pending_interrupts(&self) -> u8 { self.ie & self.iflag & 0x1F }
     pub fn request_interrupt(&mut self, bit: u8) { self.iflag |= 1 << bit; }
