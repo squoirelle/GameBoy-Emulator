@@ -1,4 +1,5 @@
 use crate::cartridge::Cartridge;
+use std::cell::Cell;
 use std::io::Write;
 
 // I/O registers that mean something to us today. The rest of 0xFF00-0xFF7F is
@@ -20,6 +21,12 @@ pub struct Bus {
     /// Everything the cartridge has sent over the serial port. Test ROMs report
     /// their results here, so this is the harness for step 3.
     pub serial: String,
+    /// gameboy-doctor needs LY pinned to 0x90 or every trace diverges. Real
+    /// games need it to move, so the two modes are mutually exclusive.
+    ly_fixed: bool,
+    /// Stand-in for the PPU's line counter until step 5. A `Cell` because it
+    /// advances on read, and `read` takes `&self`.
+    ly: Cell<u8>,
 }
 
 impl Bus {
@@ -33,7 +40,15 @@ impl Bus {
             hram: [0; 0x7F],
             ie: 0,
             serial: String::new(),
+            ly_fixed: false,
+            ly: Cell::new(0),
         }
+    }
+
+    /// Pins LY to 0x90 for gameboy-doctor runs. Leave it off for real games,
+    /// which poll for specific scanlines and hang on a constant.
+    pub fn set_ly_fixed(&mut self, fixed: bool) {
+        self.ly_fixed = fixed;
     }
 
     pub fn read(&self, addr: u16) -> u8 {
@@ -42,9 +57,18 @@ impl Bus {
             0x8000..=0x9FFF => self.vram[(addr - 0x8000) as usize],
             0xC000..=0xFDFF => self.wram[addr as usize & 0x1FFF],
             0xFE00..=0xFE9F => self.oam[(addr - 0xFE00) as usize],
-            // Stub until the PPU exists: 0x90 is a VBlank scanline, so games
-            // polling for VBlank make progress instead of hanging forever.
-            LY => 0x90,
+            LY => {
+                if self.ly_fixed {
+                    0x90
+                } else {
+                    // No PPU yet, so there is no elapsed time to derive a line
+                    // number from. Stepping one line per read is wrong by any
+                    // measure, but it makes every LY-polling loop terminate.
+                    let line = (self.ly.get() + 1) % 154;
+                    self.ly.set(line);
+                    line
+                }
+            }
             0xFF00..=0xFF7F => self.io[(addr - IO_BASE) as usize],
             0xFF80..=0xFFFE => self.hram[(addr - 0xFF80) as usize],
             0xFFFF => self.ie,
