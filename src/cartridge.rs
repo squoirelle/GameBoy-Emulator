@@ -163,7 +163,13 @@ impl fmt::Display for Header {
             self.rom_banks
         )?;
         if self.ram_banks == 0 {
-            writeln!(f, "RAM        : none")?;
+            // The two header bytes disagree often enough to be worth saying so
+            // out loud, since it decides whether a .sav is ever written.
+            if self.has_ram {
+                writeln!(f, "RAM        : none (the cartridge type claims some)")?;
+            } else {
+                writeln!(f, "RAM        : none")?;
+            }
         } else {
             writeln!(
                 f,
@@ -177,6 +183,11 @@ impl fmt::Display for Header {
             "Battery    : {}",
             if self.has_battery { "yes" } else { "no" }
         )?;
+        // Only MBC3 carries a clock, so saying "no" on every other cartridge
+        // would be noise.
+        if self.has_rtc {
+            writeln!(f, "RTC        : yes")?;
+        }
         write!(f, "Mode       : {}", if self.cgb { "CGB" } else { "DMG" })
     }
 }
