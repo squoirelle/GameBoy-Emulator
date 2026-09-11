@@ -158,6 +158,9 @@ impl Bus {
         requested & 0x01 != 0
     }
 
+    /// Read-only view of the cartridge, so the frontend can write a .sav.
+    pub fn cartridge(&self) -> &Cartridge { &self.cartridge }
+
     /// Read-only view of the PPU, for diagnostics.
     pub fn ppu(&self) -> &Ppu { &self.ppu }
 

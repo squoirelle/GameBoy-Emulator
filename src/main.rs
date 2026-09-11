@@ -23,6 +23,12 @@ const PALETTE: [u32; 4] = [0x00E0F8D0, 0x0088C070, 0x00346856, 0x00081820];
 const WIDTH: usize = 160;
 const HEIGHT: usize = 144;
 
+/// Held to drop the frame limiter.
+const TURBO_KEY: Key = Key::Tab;
+
+/// The real machine is 59.7 fps; 60 is close enough that nobody can tell.
+const TARGET_FPS: usize = 60;
+
 const KEYMAP: [(Key, Button); 8] = [
     (Key::Right, Button::Right),
     (Key::Left, Button::Left),
@@ -58,7 +64,7 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(false);
 
-    let cart = match Cartridge::load(Path::new(&path)) {
+    let mut cart = match Cartridge::load(Path::new(&path)) {
         Ok(cart) => cart,
         Err(e) => {
             eprintln!("{path}: {e}");
@@ -66,6 +72,17 @@ fn main() {
         }
     };
     println!("{}", cart.header);
+
+    // A battery-backed cartridge keeps its RAM alive between sessions; a .sav
+    // beside the ROM is where that goes. A missing one just means a new game.
+    let save_path = Path::new(&path).with_extension("sav");
+    if cart.header.has_battery {
+        match std::fs::read(&save_path) {
+            Ok(data) => cart.load_ram(&data),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => eprintln!("{}: {e}", save_path.display()),
+        }
+    }
 
     let mut bus = Bus::new(cart);
     bus.set_ly_fixed(ly_fixed);
@@ -79,6 +96,15 @@ fn main() {
     // BufWriter flushes when dropped but swallows the error, so do it here.
     if let Some(out) = trace.as_mut() {
         out.flush().expect("failed to flush the trace");
+    }
+
+    // Only on a clean exit -- a kill loses the session, as it would on a real
+    // cartridge whose battery was pulled.
+    if bus.cartridge().header.has_battery {
+        match std::fs::write(&save_path, bus.cartridge().ram()) {
+            Ok(()) => println!("saved {}", save_path.display()),
+            Err(e) => eprintln!("{}: {e}", save_path.display()),
+        }
     }
 }
 
@@ -129,9 +155,20 @@ fn run_windowed<W: Write>(cpu: &mut Cpu, bus: &mut Bus, trace: &mut Option<W>) {
         .unwrap_or_else(|e| panic!("could not open a window: {e}"));
     // update_with_buffer blocks until the frame is due, which is the whole of
     // the frame pacing this needs.
-    window.set_target_fps(60);
+    window.set_target_fps(TARGET_FPS);
+
+    let mut turbo = false;
 
     while window.is_open() && !window.is_key_down(Key::Escape) {
+        // Holding TURBO_KEY drops the frame limiter, so the emulator runs as
+        // fast as the host manages. Invaluable for getting past intros while
+        // debugging, and set_target_fps(0) is minifb's way of saying no limit.
+        let want_turbo = window.is_key_down(TURBO_KEY);
+        if want_turbo != turbo {
+            window.set_target_fps(if want_turbo { 0 } else { TARGET_FPS });
+            turbo = want_turbo;
+        }
+
         // Sampled once a frame. Games poll the register far more often than
         // that, but nobody presses a key for less than 16 milliseconds.
         for (key, button) in KEYMAP {
