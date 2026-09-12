@@ -10,7 +10,7 @@ use crate::bus::Bus;
 use crate::cpu::Cpu;
 use crate::joypad::Button;
 use cartridge::Cartridge;
-use minifb::{Key, Window, WindowOptions};
+use minifb::{Key, Scale, ScaleMode, Window, WindowOptions};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -151,7 +151,12 @@ fn dump_framebuffer(bus: &Bus) {
 fn run_windowed<W: Write>(cpu: &mut Cpu, bus: &mut Bus, trace: &mut Option<W>) {
     let mut buffer = vec![0u32; WIDTH * HEIGHT];
 
-    let mut window = Window::new("Game Boy", WIDTH, HEIGHT, WindowOptions::default())
+    let mut window = Window::new("Game Boy", WIDTH, HEIGHT, WindowOptions {
+        resize: true,
+        scale_mode: ScaleMode::AspectRatioStretch,
+        scale: Scale::X4,
+        ..WindowOptions::default()
+    })
         .unwrap_or_else(|e| panic!("could not open a window: {e}"));
     // update_with_buffer blocks until the frame is due, which is the whole of
     // the frame pacing this needs.
