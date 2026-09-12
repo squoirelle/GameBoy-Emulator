@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: x86_64-linux
+            binary: Emulator
+          - os: windows-latest
+            name: x86_64-windows
+            binary: Emulator.exe
+          - os: macos-latest
+            name: aarch64-macos
+            binary: Emulator
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-cursor0 libwayland-dev
+
+      - name: Use the current stable toolchain
+        run: rustup update stable && rustup default stable
+
+      - name: Build
+        run: cargo build --release --verbose
+
+      # The archive carries both licences alongside the binary, which is what
+      # the MIT terms ask of anyone redistributing it.
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/gameboy-${{ github.ref_name }}-${{ matrix.name }}.tar.gz" \
+            -C target/release "${{ matrix.binary }}" \
+            -C "$GITHUB_WORKSPACE" README.md LICENSE-MIT LICENSE-APACHE
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir dist
+          copy target\release\${{ matrix.binary }} .
+          7z a "dist\gameboy-${{ github.ref_name }}-${{ matrix.name }}.zip" `
+            ${{ matrix.binary }} README.md LICENSE-MIT LICENSE-APACHE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Creating the release and uploading to it is a write to the repository.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # gh is preinstalled on the runner, so this needs no third-party action.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*
