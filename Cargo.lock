@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "Emulator"
+name = "GameBoy-Emulator"
 version = "0.1.0"
 dependencies = [
  "minifb",
